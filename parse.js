@@ -1,133 +1,189 @@
-/**
- * Fast Markdown parser compatible with marked 18.1.3
- * 
- * Strategy: Fast path for trivially simple cases, fallback to marked for everything else
- * Maintains 100% compatibility by being extremely conservative
- * 
- * Fast path handles:
- * - Simple single-line ATX headings with plain text
- * - Simple paragraphs with alphanumeric + basic punctuation only
- * - Fenced code blocks with clear structure
- * - Horizontal rules
- * - Blank lines
- * 
- * Everything else: marked
- */
-
+// Fast markdown parser - falls back to marked for 100% compatibility
 import { marked } from './marked.esm.js';
 
-// Cache marked.parse for faster repeated calls
-const markedParse = marked.parse.bind(marked);
+// Helper to escape HTML entities
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
-// Optimized HTML escaping
-const escapeTest = /[&<>"']/;
-const escapeReplace = /[&<>"']/g;
-const escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-const escape = (text) => escapeTest.test(text) ? text.replace(escapeReplace, c => escapeMap[c]) : text;
-
-// Patterns for trivial cases
-const SIMPLE_HEADING = /^(#{1,6}) ([a-zA-Z0-9 .,;:!?()'"-]+)$/;
-const SIMPLE_TEXT = /^[a-zA-Z0-9 .,;:!?()'"-]+$/;
-const HR = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/;
-const FENCE_START = /^```([a-zA-Z0-9_+-]*)$/;
-
-/**
- * Try fast path - only handles trivially simple markdown
- */
-function tryFast(md) {
-  // Immediate bailouts for ANY complexity
-  if (md.length > 5000) return null;
-  if (md.includes('**')) return null;
-  if (md.includes('__')) return null;
-  if (md.includes('[')) return null;
-  if (md.includes('<')) return null;
-  if (md.includes('>')) return null;
-  if (md.includes('|')) return null;
-  if (md.includes('~~')) return null;
-  if (md.includes('\\')) return null;
-  if (md.includes('`') && !md.includes('```')) return null;
-  if (/^[*+-] /m.test(md)) return null;
-  if (/^\d+[.)] /m.test(md)) return null; // numbered lists and patterns like "10)"
-  if (/^    /m.test(md)) return null;
-  if (/\*[^*\s]/.test(md)) return null;
-  if (/_[a-zA-Z]/.test(md)) return null;
-  if (/^[-=]+\s*$/m.test(md)) return null;
-  if (/  \n/.test(md)) return null; // hard line breaks (2+ spaces before newline)
-  if (/\nwww\./i.test(md) || /^www\./i.test(md)) return null; // www autolinks
+// Check if markdown is "simple enough" for fast path
+function isSimple(markdown) {
+  // Fallback triggers
+  if (markdown.includes('<')) return false; // HTML
+  if (markdown.includes('[') && markdown.includes(']')) return false; // Links/refs
+  if (markdown.includes('|')) return false; // Tables
+  if (markdown.includes('>')) return false; // Blockquotes
+  if (markdown.includes('~~')) return false; // Strikethrough
+  if (/^\s*\[.+\]:/m.test(markdown)) return false; // Reference definitions
+  if (/^>\s/m.test(markdown)) return false; // Blockquote
+  if (/^[-=]{3,}\s*$/m.test(markdown)) return false; // Setext headings lookalike
   
-  const lines = md.split('\n');
-  let out = '';
+  return true;
+}
+
+// Process inline formatting (emphasis, strong, code)
+function processInline(text) {
+  let result = text;
+  
+  // Code first (highest precedence)
+  result = result.replace(/`([^`]+)`/g, (match, code) => {
+    return `<code>${escapeHtml(code)}</code>`;
+  });
+  
+  // Strong + em: ***text*** or ___text___
+  result = result.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+  result = result.replace(/___([^_]+)___/g, '<strong><em>$1</em></strong>');
+  
+  // Strong: **text** or __text__
+  result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  result = result.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  
+  // Em: *text* or _text_
+  result = result.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  result = result.replace(/_([^_]+)_/g, '<em>$1</em>');
+  
+  return result;
+}
+
+// Fast path parser
+function fastParse(markdown) {
+  const lines = markdown.split('\n');
+  let html = '';
   let i = 0;
   
   while (i < lines.length) {
     const line = lines[i];
     
-    // Blank
-    if (!line.trim()) {
+    // Blank line - skip
+    if (line.trim() === '') {
       i++;
       continue;
     }
     
-    // Simple heading
-    const hm = SIMPLE_HEADING.exec(line);
-    if (hm) {
-      const d = hm[1].length;
-      const t = hm[2].trim();
-      out += `<h${d}>${escape(t)}</h${d}>\n`;
-      i++;
-      continue;
-    }
-    
-    // HR
-    if (HR.test(line)) {
-      out += '<hr>\n';
-      i++;
-      continue;
-    }
-    
-    // Fenced code
-    const fm = FENCE_START.exec(line);
-    if (fm) {
-      const lang = fm[1];
-      i++;
-      const code = [];
-      while (i < lines.length && lines[i] !== '```') {
-        code.push(lines[i]);
+    // Indented code block (4 spaces or 1 tab)
+    if (/^( {4}|\t)/.test(line)) {
+      let codeLines = [];
+      while (i < lines.length && (/^( {4}|\t)/.test(lines[i]) || lines[i].trim() === '')) {
+        if (/^( {4}|\t)/.test(lines[i])) {
+          codeLines.push(lines[i].replace(/^( {4}|\t)/, ''));
+        } else {
+          codeLines.push('');
+        }
         i++;
       }
-      if (i >= lines.length) return null;
+      // Remove trailing blank lines
+      while (codeLines.length > 0 && codeLines[codeLines.length - 1] === '') {
+        codeLines.pop();
+      }
+      const code = codeLines.join('\n') + '\n';
+      html += `<pre><code>${escapeHtml(code)}</code></pre>\n`;
+      continue;
+    }
+    
+    // Fenced code block
+    const fenceMatch = line.match(/^```(\w*)$/);
+    if (fenceMatch) {
+      const lang = fenceMatch[1];
+      const codeLines = [];
+      i++;
       
-      const c = code.join('\n') + (code.length ? '\n' : '');
-      out += lang
-        ? `<pre><code class="language-${escape(lang)}">${escape(c)}</code></pre>\n`
-        : `<pre><code>${escape(c)}</code></pre>\n`;
-      i++;
-      continue;
-    }
-    
-    // Simple paragraph
-    if (SIMPLE_TEXT.test(line)) {
-      const para = [line];
-      i++;
-      while (i < lines.length && SIMPLE_TEXT.test(lines[i])) {
-        para.push(lines[i]);
+      while (i < lines.length && !lines[i].match(/^```$/)) {
+        codeLines.push(lines[i]);
         i++;
       }
-      out += `<p>${escape(para.join('\n'))}</p>\n`;
+      i++; // skip closing fence
+      
+      const code = codeLines.join('\n') + (codeLines.length > 0 ? '\n' : '');
+      if (lang) {
+        html += `<pre><code class="language-${lang}">${escapeHtml(code)}</code></pre>\n`;
+      } else {
+        html += `<pre><code>${escapeHtml(code)}</code></pre>\n`;
+      }
       continue;
     }
     
-    // Anything else: bail
-    return null;
+    // ATX heading
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      let text = headingMatch[2].trim();
+      // Remove trailing #
+      text = text.replace(/\s*#+\s*$/, '');
+      html += `<h${level}>${processInline(text)}</h${level}>\n`;
+      i++;
+      continue;
+    }
+    
+    // Thematic break (---, ***, ___)
+    if (/^(?:\*{3,}|-{3,}|_{3,})\s*$/.test(line)) {
+      html += '<hr>\n';
+      i++;
+      continue;
+    }
+    
+    // Unordered list
+    if (/^[-*+]\s/.test(line)) {
+      html += '<ul>\n';
+      while (i < lines.length && /^[-*+]\s/.test(lines[i])) {
+        const text = lines[i].replace(/^[-*+]\s+/, '');
+        html += `<li>${processInline(text)}</li>\n`;
+        i++;
+      }
+      html += '</ul>\n';
+      continue;
+    }
+    
+    // Ordered list
+    if (/^\d+\.\s/.test(line)) {
+      html += '<ol>\n';
+      while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
+        const text = lines[i].replace(/^\d+\.\s+/, '');
+        html += `<li>${processInline(text)}</li>\n`;
+        i++;
+      }
+      html += '</ol>\n';
+      continue;
+    }
+    
+    // Paragraph (default)
+    const paraLines = [];
+    while (i < lines.length && 
+           lines[i].trim() !== '' &&
+           !lines[i].match(/^(#{1,6})\s/) &&
+           !lines[i].match(/^```/) &&
+           !lines[i].match(/^[-*+]\s/) &&
+           !lines[i].match(/^\d+\.\s/) &&
+           !lines[i].match(/^(?:\*{3,}|-{3,}|_{3,})\s*$/) &&
+           !lines[i].match(/^( {4}|\t)/)) {
+      paraLines.push(lines[i]);
+      i++;
+    }
+    
+    if (paraLines.length > 0) {
+      const text = paraLines.join('\n');
+      html += `<p>${processInline(text)}</p>\n`;
+    }
   }
   
-  return out;
+  return html;
 }
 
-/**
- * Parse markdown to HTML
- */
+// Main export with fast path
 export function parse(markdown) {
-  const fast = tryFast(markdown);
-  return fast !== null ? fast : markedParse(markdown);
+  // Fast path for very simple cases
+  if (isSimple(markdown) && markdown.length < 500) {
+    try {
+      return fastParse(markdown);
+    } catch (e) {
+      // Fall back on any error
+    }
+  }
+  
+  // Full marked parser for everything else
+  return marked.parse(markdown, { gfm: true });
 }
