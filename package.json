@@ -1,0 +1,13 @@
+{
+  "name": "markdown-render-speed-02",
+  "version": "1.0.0",
+  "description": "Fast Markdown parser for make.fun bounty",
+  "type": "module",
+  "scripts": {
+    "build": "tsc main.ts --target es2020 --module es2020 --outDir .",
+    "test": "node main.ts"
+  },
+  "keywords": ["markdown", "parser", "performance"],
+  "author": "jackcollmas",
+  "license": "MIT"
+}
