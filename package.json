@@ -1,13 +1,29 @@
 {
   "name": "markdown-render-speed-02",
   "version": "1.0.0",
-  "description": "Fast Markdown parser for make.fun bounty",
+  "description": "Fast markdown parser with optimized fast path for make.fun bounty",
   "type": "module",
+  "main": "parse.js",
   "scripts": {
     "build": "tsc main.ts --target es2020 --module es2020 --outDir .",
-    "test": "node main.ts"
+    "test": "node main.ts",
+    "verify": "node -e \"const fs=require('fs'); const e=JSON.parse(fs.readFileSync('../markdown-render-speed-02-kit/practice/reference/expected.json','utf8')); const a=JSON.parse(fs.readFileSync('html.json','utf8')); const m=e.cases.filter((c,i)=>c.html===a[i]).length; console.log(m===720?'✅ PASS':'❌ FAIL','-',m,'/ 720');\""
   },
-  "keywords": ["markdown", "parser", "performance"],
+  "keywords": [
+    "markdown",
+    "parser",
+    "performance",
+    "marked",
+    "fast",
+    "make.fun"
+  ],
   "author": "jackcollmas",
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jackcollmas/markdown-render-speed-02.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
